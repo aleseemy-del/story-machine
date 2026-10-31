@@ -1,4 +1,4 @@
-import { OPENROUTER_API_KEY, MODEL } from './config';
+import { OPENROUTER_API_KEY, MODEL, FALLBACK_MODELS } from './config';
 
 const SYSTEM_PROMPT = `أنت راوي كبير في السن يحكي حكاية عند النار في البر.
 اكتب بالعربية بلهجة كويتية خفيفة مفهومة.
@@ -17,11 +17,7 @@ export class StoryError extends Error {
   }
 }
 
-export async function tellStory(spark) {
-  if (!OPENROUTER_API_KEY || OPENROUTER_API_KEY.includes('PUT_YOUR_KEY')) {
-    throw new StoryError('ما لقيت مفتاح OpenRouter. حطه في ملف config.js.', 'no-key');
-  }
-
+async function requestStory(spark, model) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
@@ -35,7 +31,7 @@ export async function tellStory(spark) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: MODEL,
+        model,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: spark },
@@ -52,7 +48,10 @@ export async function tellStory(spark) {
   }
 
   if (!response.ok) {
-    throw new StoryError('الراوي مشغول شوي.', String(response.status));
+    throw new StoryError(
+      response.status === 429 ? 'الراوي مزدحم هالحين.' : 'الراوي مشغول شوي.',
+      String(response.status)
+    );
   }
 
   let data;
@@ -67,4 +66,25 @@ export async function tellStory(spark) {
     throw new StoryError('الراوي سكت ولا قال شي.', 'empty');
   }
   return text.trim();
+}
+
+// أخطاء يستاهل معها نجرّب نموذج ثاني
+const RETRYABLE = new Set(['429', 'timeout', 'empty', 'bad-json']);
+
+export async function tellStory(spark) {
+  if (!OPENROUTER_API_KEY || OPENROUTER_API_KEY.includes('PUT_YOUR_KEY')) {
+    throw new StoryError('ما لقيت مفتاح OpenRouter. حطه في ملف config.js.', 'no-key');
+  }
+
+  let lastError;
+  for (const model of [MODEL, ...(FALLBACK_MODELS || [])]) {
+    try {
+      return await requestStory(spark, model);
+    } catch (e) {
+      lastError = e;
+      const serverError = /^5\d\d$/.test(e.code);
+      if (!RETRYABLE.has(e.code) && !serverError) break;
+    }
+  }
+  throw lastError;
 }
